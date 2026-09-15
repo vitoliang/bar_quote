@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# PyInstaller 打包产物（保留 QuoteBar.spec 便于重新打包）
+# dist 下只跟踪打包好的 exe，运行期释放的 config.json 等不入库
+build/
+dist/*
+!dist/QuoteBar.exe
+*.manifest
+
+# 虚拟环境
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时脚本
+_test*.py

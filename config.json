@@ -1,0 +1,58 @@
+{
+  "symbols": [
+    {
+      "code": "688519.SH"
+    },
+    {
+      "code": "688432.SH"
+    },
+    {
+      "code": "301176.SZ"
+    },
+    {
+      "code": "300911.SZ"
+    }
+  ],
+  "refresh_seconds": 3,
+  "mode": "desktop",
+  "position": {
+    "x": 14,
+    "y": 2102,
+    "margin": 8,
+    "gap_above_taskbar": 2,
+    "embed_taskbar": false
+  },
+  "statusbar": {
+    "pad_x": 10,
+    "pad_y": 5,
+    "gap": 16,
+    "show_avg": true,
+    "corner_radius": 8,
+    "border_width": 1
+  },
+  "font": {
+    "family": "Arial",
+    "size": 11,
+    "bold": false
+  },
+  "colors": {
+    "background": "#1e1e1e",
+    "name": "#aaaaaa",
+    "price": "#eeeeee",
+    "up": "#ff4d4f",
+    "down": "#00c853",
+    "flat": "#bbbbbb",
+    "hover_bg": "#333333",
+    "border": null,
+    "auto_match_taskbar": true
+  },
+  "timeline": {
+    "width": 280,
+    "height": 130,
+    "bg": "#1e1e1e",
+    "border": "#444444"
+  },
+  "layout": {
+    "price_decimals": 2
+  }
+}
