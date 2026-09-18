@@ -909,6 +909,18 @@ def _short_name(name, fallback=""):
     return name[:2]
 
 
+def _is_convertible_bond(native):
+    """是否可转债（东方财富 secid 形式）：沪市 11xxxx（1. 前缀）、深市 12xxxx（0. 前缀）。"""
+    market, _, sym = (native or "").partition(".")
+    if not sym:
+        return False
+    if market == "1":
+        return sym.startswith("11")
+    if market == "0":
+        return sym.startswith("12")
+    return False
+
+
 class ItemWidget:
     def __init__(self, parent, native, code, font, bg):
         self.native = native
@@ -1311,7 +1323,16 @@ class QuoteBar:
         q = self.quotes.get(it.native) if it.native else None
         pct = q.get("pct") if q else None
 
-        if pct is None:
+        if _is_convertible_bond(it.native):
+            # 可转债：只显示价格，不显示涨跌幅
+            price = q.get("price") if q else None
+            try:
+                dec = int(cfg.get("layout", {}).get("price_decimals", 2) or 0)
+            except (TypeError, ValueError):
+                dec = 2
+            pct_txt = ("%%.%df" % dec % price) if price is not None else "--"
+            pct_color = col["price"]
+        elif pct is None:
             pct_txt, pct_color = "--", col["flat"]
         elif pct > 0:
             pct_txt, pct_color = "%+.2f%%" % pct, col["up"]
@@ -1690,14 +1711,19 @@ class QuoteBar:
         if pct is None and price is not None and pre:
             pct = (price - pre) / pre * 100.0
 
-        color = col["flat"]
-        if pct is not None:
-            color = col["up"] if pct > 0 else (col["down"] if pct < 0 else col["flat"])
-
         ps = ("%%.%df" % dec % price) if price is not None else "--"
         pc = ("%+.2f%%" % pct) if pct is not None else "--"
-        cv.create_text(6, 11, text="%s  %s  %s" % (name, ps, pc),
-                       anchor="w", fill=color, font=self.font)
+
+        if _is_convertible_bond(native):
+            # 可转债：标题只显示名称与价格，不带涨跌幅
+            color = col["price"]
+            title = "%s  %s" % (name, ps)
+        else:
+            color = col["flat"]
+            if pct is not None:
+                color = col["up"] if pct > 0 else (col["down"] if pct < 0 else col["flat"])
+            title = "%s  %s  %s" % (name, ps, pc)
+        cv.create_text(6, 11, text=title, anchor="w", fill=color, font=self.font)
 
         if not rows:
             cv.create_text(w / 2, h / 2, text="无数据", fill=col["flat"], font=self.font)

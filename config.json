@@ -1,16 +1,16 @@
 {
   "symbols": [
-    {
+{
       "code": "688519.SH"
     },
     {
       "code": "688432.SH"
     },
     {
-      "code": "301176.SZ"
+      "code": "300905.SZ"
     },
-    {
-      "code": "300911.SZ"
+	{
+      "code": "118064.SH"
     }
   ],
   "refresh_seconds": 3,
