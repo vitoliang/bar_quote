@@ -80,8 +80,10 @@ EASTMONEY_QUOTE_FIELDS = "f43,f44,f45,f46,f47,f48,f57,f58,f60"
 # 分时字段：f51时间 f52开盘 f53现价 f54最高 f55最低 f56成交量 f57成交额 f58均价
 EASTMONEY_TREND_FIELDS1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
 EASTMONEY_TREND_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58"
-# 手机版个股页：行情数据由服务端渲染在 HTML 的 quotedata 里，不经过 push 接口，
-# 不易被限流，作为 push 接口全部失败时的兜底来源（缺最高/最低/开盘价）。
+# 手机版个股页：行情数据由服务端渲染在 HTML 的 quotedata 里，不经过 push 接口。
+# 实测 push2 实时接口会随机断开连接（RemoteDisconnected），该页连通稳定且
+# A 股价格为实时值，因此作为主行情源；push 接口降为备份源
+# （wap 缺最高/最低/开盘价，当前界面未使用这些字段）。
 WAP_QUOTE_HOST = "wap.eastmoney.com"
 
 USER_AGENT = (
@@ -823,13 +825,25 @@ def _fetch_quote_push(native):
 
 
 def _fetch_quote_wap(native):
-    """通过手机版个股页兜底抓取行情（服务端渲染，稳定但无最高/最低/开盘）。
+    """通过手机版个股页抓取行情（服务端渲染，连通稳定；无最高/最低/开盘）。
 
     wap.eastmoney.com 的个股页把行情内嵌在 HTML 的 `var quotedata = {...}` 里，
-    不经过 push 接口，因此 push 被限流时仍能取到名称/现价/涨跌额/涨跌幅。
+    不经过 push 接口。实测 push2 实时接口会随机断开连接（成功率约 3/8），
+    而该页连通率 100% 且 A 股价格为实时值，故作为主行情源。
     """
     path = "/quote/stock/%s.html?appfenxiang=1" % native
-    raw = _http_get_bytes(WAP_QUOTE_HOST, path)
+    raw = None
+    last_err = None
+    for attempt in range(2):
+        try:
+            raw = _http_get_bytes(WAP_QUOTE_HOST, path)
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(0.3)
+    if raw is None:
+        raise last_err or RuntimeError("wap 请求失败")
     m = re.search(r"var quotedata = (\{.*?\});", raw.decode("utf-8", "replace"))
     if not m:
         raise ValueError("网页中未找到 quotedata")
@@ -865,14 +879,17 @@ def _fetch_quote_wap(native):
 
 
 def fetch_quote(native):
-    """抓取实时行情：优先 push 接口（数据最全），全部失败时回退手机版网页兜底。"""
+    """抓取实时行情：优先手机版网页（连通稳定），失败时回退 push 接口。
+
+    push 接口数据更全（含最高/最低），但当前会随机断连，故仅作备份。
+    """
     try:
-        return _fetch_quote_push(native)
+        return _fetch_quote_wap(native)
     except Exception as e:
         try:
-            return _fetch_quote_wap(native)
+            return _fetch_quote_push(native)
         except Exception as e2:
-            raise RuntimeError("push 与 wap 均获取失败: %s / %s" % (e, e2))
+            raise RuntimeError("wap 与 push 均获取失败: %s / %s" % (e, e2))
 
 
 def fetch_timeline(native):
