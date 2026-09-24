@@ -81,10 +81,12 @@ EASTMONEY_QUOTE_FIELDS = "f43,f44,f45,f46,f47,f48,f57,f58,f60"
 EASTMONEY_TREND_FIELDS1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
 EASTMONEY_TREND_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58"
 # 手机版个股页：行情数据由服务端渲染在 HTML 的 quotedata 里，不经过 push 接口。
-# 实测 push2 实时接口会随机断开连接（RemoteDisconnected），该页连通稳定且
-# A 股价格为实时值，因此作为主行情源；push 接口降为备份源
-# （wap 缺最高/最低/开盘价，当前界面未使用这些字段）。
+# 实测该页是服务端缓存快照：价格滞后于真实价，且会命中不同缓存副本导致数值跳动，
+# 因此只作为最后兜底（缺最高/最低/开盘价，当前界面未使用这些字段）。
 WAP_QUOTE_HOST = "wap.eastmoney.com"
+# 腾讯行情接口：实测连通率 100%、A 股为实时价、含最高/最低/昨收，作为主行情源。
+# （港股为延时行情，与东财免费源表现一致。）
+TX_QUOTE_HOST = "qt.gtimg.cn"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -825,11 +827,11 @@ def _fetch_quote_push(native):
 
 
 def _fetch_quote_wap(native):
-    """通过手机版个股页抓取行情（服务端渲染，连通稳定；无最高/最低/开盘）。
+    """通过手机版个股页抓取行情（服务端缓存快照，价格滞后；末位兜底）。
 
-    wap.eastmoney.com 的个股页把行情内嵌在 HTML 的 `var quotedata = {...}` 里，
-    不经过 push 接口。实测 push2 实时接口会随机断开连接（成功率约 3/8），
-    而该页连通率 100% 且 A 股价格为实时值，故作为主行情源。
+    wap.eastmoney.com 的个股页把行情内嵌在 HTML 的 `var quotedata = {...}` 里。
+    实测该值是服务端缓存快照：价格滞后于真实价，且不同请求会命中不同缓存副本
+    （同一标的会在几分钟前的旧价之间跳动），因此只在腾讯与 push 都失败时使用。
     """
     path = "/quote/stock/%s.html?appfenxiang=1" % native
     raw = None
@@ -878,18 +880,70 @@ def _fetch_quote_wap(native):
     }
 
 
-def fetch_quote(native):
-    """抓取实时行情：优先手机版网页（连通稳定），失败时回退 push 接口。
+def _to_tx_code(native):
+    """东方财富 secid -> 腾讯代码（sh/sz/hk 前缀）；不支持时返回 None。"""
+    market, _, sym = (native or "").partition(".")
+    sym = re.sub(r"\D", "", sym)
+    if not sym:
+        return None
+    if market == "1":
+        return "sh" + sym
+    if market == "0":
+        return "sz" + sym
+    if market == "116":
+        return "hk" + sym[-5:].zfill(5)
+    return None
 
-    push 接口数据更全（含最高/最低），但当前会随机断连，故仅作备份。
+
+def _fetch_quote_tx(native):
+    """通过腾讯接口抓取行情（主行情源：连通稳定，A 股为实时价）。
+
+    响应是 GBK 文本 `v_sh600000="...";`，字段按 `~` 分隔，用到：
+    1名称 3现价 4昨收 30时间 32涨跌幅% 33最高 34最低。
     """
-    try:
-        return _fetch_quote_wap(native)
-    except Exception as e:
+    tx = _to_tx_code(native)
+    if not tx:
+        raise ValueError("不支持的标的: %s" % native)
+    raw = _http_get_bytes(TX_QUOTE_HOST, "/q=%s" % tx)
+    m = re.search(r'v_%s="([^"]*)"' % re.escape(tx), raw.decode("gbk", "replace"))
+    if not m:
+        raise ValueError("腾讯接口无数据")
+    f = m.group(1).split("~")
+    if len(f) < 5:
+        raise ValueError("腾讯返回字段不足")
+    price = _to_float(f[3])
+    if price is None or price <= 0:
+        raise ValueError("腾讯返回价格无效: %r" % (f[3],))
+    pre = _to_float(f[4])
+    pct = _to_float(f[32]) if len(f) > 32 else None
+    if pct is None and pre:
+        pct = (price - pre) / pre * 100.0
+
+    return {
+        "native": native,
+        "name": (f[1] if len(f) > 1 else "").strip(),
+        "price": price,
+        "pre": pre,
+        "high": _to_float(f[33]) if len(f) > 33 else None,
+        "low": _to_float(f[34]) if len(f) > 34 else None,
+        "avg": None,   # 均价由分时数据提供
+        "pct": pct,
+    }
+
+
+def fetch_quote(native):
+    """抓取实时行情：腾讯（主）→ push（备）→ wap（末位兜底）。
+
+    实测（2026-09）：腾讯源连通率 100% 且 A 股为实时价；push2 会随机断开连接；
+    wap 个股页是缓存快照、价格滞后且会跳动，故排最后。
+    """
+    errs = []
+    for fn in (_fetch_quote_tx, _fetch_quote_push, _fetch_quote_wap):
         try:
-            return _fetch_quote_push(native)
-        except Exception as e2:
-            raise RuntimeError("wap 与 push 均获取失败: %s / %s" % (e, e2))
+            return fn(native)
+        except Exception as e:
+            errs.append("%s: %s" % (fn.__name__, e))
+    raise RuntimeError("全部行情源均失败 -> " + " | ".join(errs))
 
 
 def fetch_timeline(native):
