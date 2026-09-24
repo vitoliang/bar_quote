@@ -87,6 +87,8 @@ WAP_QUOTE_HOST = "wap.eastmoney.com"
 # 腾讯行情接口：实测连通率 100%、A 股为实时价、含最高/最低/昨收，作为主行情源。
 # （港股为延时行情，与东财免费源表现一致。）
 TX_QUOTE_HOST = "qt.gtimg.cn"
+# 腾讯分时接口（分时图主源）：东财 trends2 会随机断连，导致分时图取不到数据。
+TX_TREND_HOST = "web.ifzq.gtimg.cn"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -730,9 +732,9 @@ def _in_query_window(now=None):
     return _QUERY_WINDOW_START <= hm < _QUERY_WINDOW_END
 
 
-def _http_get_bytes(host, path, timeout=8):
-    """用 http.client 请求东方财富并返回原始字节（自动解 gzip）。"""
-    headers = {
+def _http_get_bytes(host, path, timeout=8, headers=None):
+    """用 http.client 请求并返回原始字节（自动解 gzip）。"""
+    headers = headers or {
         "User-Agent": USER_AGENT,
         "Referer": "https://quote.eastmoney.com/",
         "Accept": "*/*",
@@ -946,8 +948,8 @@ def fetch_quote(native):
     raise RuntimeError("全部行情源均失败 -> " + " | ".join(errs))
 
 
-def fetch_timeline(native):
-    """抓取当日分时数据，返回 (昨收, [(时间, 现价, 均价), ...])。"""
+def _fetch_timeline_em(native):
+    """通过东方财富接口抓取当日分时（备份源）。"""
     path = "%s?secid=%s&fields1=%s&fields2=%s&ut=%s&fltt=2&ndays=1&iscr=0&iscca=0" % (
         EASTMONEY_TREND_PATH, native,
         EASTMONEY_TREND_FIELDS1, EASTMONEY_TREND_FIELDS2, EASTMONEY_UT)
@@ -966,6 +968,79 @@ def fetch_timeline(native):
             if price is not None:
                 rows.append((parts[0], price, avg))
     return pre, rows
+
+
+def _tx_headers():
+    return {
+        "User-Agent": USER_AGENT,
+        "Referer": "https://gu.qq.com/",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+    }
+
+
+def _fetch_timeline_tx(native):
+    """通过腾讯接口抓取当日分时（主源），返回 (昨收, [(时间, 现价, 均价), ...])。
+
+    响应 data.<code>.data.data 每行是 "HHMM 价格 累计成交量 累计成交额"，
+    接口不直接给均价，用「累计成交额 / (累计成交量 * 单位)」算出；
+    单位由首行校准（首笔成交的均价即成交价）：股票/港股为 1，转债为 10。
+    """
+    tx = _to_tx_code(native)
+    if not tx:
+        raise ValueError("不支持的标的: %s" % native)
+    kind = "hkMinute" if tx.startswith("hk") else "minute"
+    path = "/appstock/app/%s/query?code=%s" % (kind, tx)
+    raw = _http_get_bytes(TX_TREND_HOST, path, headers=_tx_headers())
+    obj = json.loads(raw.decode("utf-8", "replace"))
+    node = (obj.get("data") or {}).get(tx) or {}
+    qt = (node.get("qt") or {}).get(tx) or []
+    pre = _to_float(qt[4]) if len(qt) > 4 else None
+
+    parsed = []
+    for seg in ((node.get("data") or {}).get("data") or []):
+        parts = str(seg).split()
+        if len(parts) < 4:
+            continue
+        price = _to_float(parts[1])
+        if price is None:
+            continue
+        parsed.append((parts[0], price, _to_float(parts[2]), _to_float(parts[3])))
+    if not parsed:
+        raise ValueError("腾讯分时无数据")
+
+    unit = None
+    _, p0, v0, a0 = parsed[0]
+    try:
+        ratio = a0 / (v0 * p0)
+        unit = min([1, 10, 100, 1000], key=lambda k: abs(ratio - k))
+    except Exception:
+        unit = None
+
+    rows = []
+    for t, price, vol, amt in parsed:
+        avg = None
+        if unit and vol and amt:
+            try:
+                avg = amt / (vol * unit)
+            except Exception:
+                avg = None
+        rows.append((t, price, avg))
+    return pre, rows
+
+
+def fetch_timeline(native):
+    """抓取当日分时：腾讯（主）→ 东财（备）。
+
+    东财 trends2 会随机断连，导致分时图取不到数据，故腾讯接口优先。
+    """
+    try:
+        return _fetch_timeline_tx(native)
+    except Exception as e:
+        try:
+            return _fetch_timeline_em(native)
+        except Exception as e2:
+            raise RuntimeError("分时获取失败(腾讯/东财): %s / %s" % (e, e2))
 
 
 # ---------------------------------------------------------------------------
@@ -1851,7 +1926,7 @@ def main():
     _set_dpi_awareness()
     socket.setdefaulttimeout(8)
     print("=" * 46)
-    print(" 任务栏行情已启动（数据源：东方财富）")
+    print(" 任务栏行情已启动（数据源：腾讯为主 / 东方财富备用）")
     print(" 三连击任意标的退出程序；请勿关闭本窗口")
     print("=" * 46)
     app = QuoteBar()
